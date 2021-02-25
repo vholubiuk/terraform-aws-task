@@ -7,6 +7,12 @@ provider "aws" {
 }
 
 
+data "aws_vpc" "default" {
+  default = true
+}
+data "aws_subnet_ids" "default" {
+  vpc_id = data.aws_vpc.default.id
+}
 data "aws_availability_zones" "available" {}
 data "aws_ami" "latest_amazon_windows_2019" {
   owners      = ["amazon"]
@@ -64,7 +70,7 @@ resource "aws_autoscaling_group" "web" {
   min_elb_capacity     = 2
   health_check_type    = "ELB"
   vpc_zone_identifier  = [aws_default_subnet.default_az1.id, aws_default_subnet.default_az2.id]
-  load_balancers       = [aws_elb.web.name]
+  target_group_arns    = [aws_lb_target_group.nlb_target_group.arn]
   dynamic "tag" {
     for_each = {
       Name   = "WebServer in ASG"
@@ -84,27 +90,44 @@ resource "aws_autoscaling_group" "web" {
   }
 }
 
-resource "aws_elb" "web" {
-  name               = "WebServer-HA-ELB"
-  availability_zones = [data.aws_availability_zones.available.names[0], data.aws_availability_zones.available.names[1]]
-  security_groups    = [aws_security_group.web.id]
-  listener {
-    lb_port           = 80
-    lb_protocol       = "http"
-    instance_port     = 80
-    instance_protocol = "http"
-  }
-  health_check {
-    healthy_threshold   = 2
-    unhealthy_threshold = 2
-    timeout             = 3
-    target              = "HTTP:80/"
-    interval            = 30
-  }
+resource "aws_lb" "nlb" {
+  name                       = "nlb-lb-tf"
+  internal                   = false
+  load_balancer_type         = "network"
+  subnets                    = data.aws_subnet_ids.default.ids
+  enable_deletion_protection = true
   tags = {
-    Name = "WebServer-Highly-Available-ELB"
+    Environment = "production"
   }
 }
+
+resource "aws_lb_listener" "nlb" {
+  load_balancer_arn = aws_lb.nlb.arn
+  port              = 80
+  protocol          = "TCP"
+
+  default_action {
+    target_group_arn = aws_lb_target_group.nlb_target_group.id
+    type             = "forward"
+  }
+  depends_on = [aws_lb.nlb, aws_lb_target_group.nlb_target_group]
+}
+
+resource "aws_lb_target_group" "nlb_target_group" {
+  name     = "tf-tg-lb"
+  port     = 80
+  protocol = "TCP"
+  vpc_id   = data.aws_vpc.default.id
+
+  health_check {
+    interval            = 30
+    port                = 80
+    healthy_threshold   = 5
+    unhealthy_threshold = 5
+    protocol            = "TCP"
+  }
+}
+
 
 resource "aws_default_subnet" "default_az1" {
   availability_zone = data.aws_availability_zones.available.names[0]
@@ -121,7 +144,7 @@ resource "aws_key_pair" "devops" {
 
 #--------------------------------------------------
 output "web_loadbalancer_url" {
-  value = aws_elb.web.dns_name
+  value = aws_lb.nlb.dns_name
 }
 output "web_loadbalancer_ip" {
   value = data.aws_availability_zones.available.names
